@@ -1,83 +1,108 @@
 #include <Arduino.h>
 
-// —— Pin Definitions ——
-const byte Pot_PIN    = A0;
-const byte PWM_PIN    = 10;
-const byte DIR_PIN    = 51;
-const byte ENC_A_PIN  = 2;
-const byte ENC_B_PIN  = 3;
+// ===========================
+//        Pin Definitions
+// ===========================
+const byte POT_PIN    = A0;   // Analog pin for potentiometer input
+const byte PWM_PIN    = 10;   // PWM output to motor driver
+const byte DIR_PIN    = 51;   // Digital output for motor direction
+const byte ENC_A_PIN  = 2;    // Encoder channel A (interrupt)
+const byte ENC_B_PIN  = 3;    // Encoder channel B (interrupt)
 
-// —— Configuration ——
-const int   DEAD_ZONE      = 20;      // ±20 around 512
-const float STEPS_PER_REV  = 100.0;   // 25 slots × 4 edges
-const float MAX_RPM        = 1000.0;  // clamp limit
-const int   SMOOTH_COUNT   = 5;       // moving average window
+// ===========================
+//        Configuration
+// ===========================
+const int   DEAD_ZONE      = 20;      // Dead zone around center (±20)
+const float STEPS_PER_REV  = 100.0;   // Encoder steps per revolution (25 slots × 4 edges)
+const float MAX_RPM        = 1000.0;  // Maximum allowed RPM (clamp)
+const int   SMOOTH_COUNT   = 5;       // Size of the moving average window for RPM smoothing
 
-// —— State Variables ——
-volatile unsigned long lastEdgeTime = 0;
-volatile float rpmInstant = 0;
-float rpmHistory[SMOOTH_COUNT] = {0};
-uint8_t rpmIdx = 0;
+// ===========================
+//        State Variables
+// ===========================
+volatile unsigned long lastEdgeTime = 0; // Time of last encoder edge (for RPM calc)
+volatile float rpmInstant = 0;           // Latest instantaneous RPM measured
+float rpmHistory[SMOOTH_COUNT] = {0};    // Circular buffer for RPM smoothing
+uint8_t rpmIdx = 0;                      // Index in RPM history buffer
 
+// ===========================
+//        Setup Function
+// ===========================
 void setup() {
-  Serial.begin(9600);
-  
-  pinMode(Pot_PIN, INPUT);
-  pinMode(PWM_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
-  pinMode(ENC_A_PIN, INPUT_PULLUP);
-  pinMode(ENC_B_PIN, INPUT_PULLUP);
-  
-  // Attach interrupts on both channels
+  Serial.begin(9600);  // Initialize serial communication for debugging/monitoring
+
+  // Set pin modes
+  pinMode(POT_PIN, INPUT);                // Potentiometer input
+  pinMode(PWM_PIN, OUTPUT);               // PWM output for motor speed
+  pinMode(DIR_PIN, OUTPUT);               // Direction control output
+  pinMode(ENC_A_PIN, INPUT_PULLUP);       // Encoder channel A with pull-up
+  pinMode(ENC_B_PIN, INPUT_PULLUP);       // Encoder channel B with pull-up
+
+  // Attach hardware interrupts for both encoder channels
   attachInterrupt(digitalPinToInterrupt(ENC_A_PIN), onEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_B_PIN), onEncoder, CHANGE);
 }
 
+// ===========================
+//        Main Loop
+// ===========================
 void loop() {
-  // 1) Read pot, compute PWM & direction
-  int pot = analogRead(Pot_PIN);         // 0–1023
-  int delta = pot - 512;
-  byte pwm = 0;
-  int dirState = 0;  // -1=REV, 0=STOP, 1=FWD
+  // 1) Read potentiometer and determine PWM and direction
+  int pot = analogRead(POT_PIN);           // Read potentiometer (range: 0-1023)
+  int delta = pot - 512;                   // Center at zero (512 = mid-point)
+  byte pwm = 0;                            // PWM value for motor speed
+  int dirState = 0;                        // Motor direction: -1=REV, 0=STOP, 1=FWD
 
+  // Check if outside the dead zone
   if (abs(delta) > DEAD_ZONE) {
+    // Map potentiometer value to PWM range (0–255), ignoring dead zone
     pwm = map(abs(delta), DEAD_ZONE, 511, 0, 255);
-    dirState = (delta > 0) ? 1 : -1;
+    dirState = (delta > 0) ? 1 : -1; // Set direction based on sign of delta
   }
-  
+
+  // Set motor direction pin
   digitalWrite(DIR_PIN, dirState > 0 ? HIGH : LOW);
+  // Set motor speed via PWM
   analogWrite(PWM_PIN, pwm);
 
-  // 2) Compute smoothed RPM
-  rpmHistory[rpmIdx] = rpmInstant;
-  rpmIdx = (rpmIdx + 1) % SMOOTH_COUNT;
-  float rpmSum = 0;
-  for (int i = 0; i < SMOOTH_COUNT; i++) rpmSum += rpmHistory[i];
-  float rpmSmoothed = rpmSum / SMOOTH_COUNT;
-  rpmSmoothed = constrain(rpmSmoothed, 0, MAX_RPM);
+  // 2) Smooth RPM using moving average
+  rpmHistory[rpmIdx] = rpmInstant;              // Store latest RPM in buffer
+  rpmIdx = (rpmIdx + 1) % SMOOTH_COUNT;         // Advance buffer index (circular)
+  float rpmSum = 0.0;
+  // Sum all stored RPM values
+  for (int i = 0; i < SMOOTH_COUNT; i++) {
+    rpmSum += rpmHistory[i];
+  }
+  // Calculate average RPM and clamp to MAX_RPM
+  float rpmSmoothed = constrain(rpmSum / SMOOTH_COUNT, 0, MAX_RPM);
 
-  // 3) Print results
+  // 3) Print results every 200 ms
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint >= 200) {
-    Serial.print("Pot=");      Serial.print(pot);
-    Serial.print(" | PWM=");    Serial.print(pwm);
+    Serial.print("Pot=");   Serial.print(pot);           // Print potentiometer value
+    Serial.print(" | PWM=");    Serial.print(pwm);       // Print PWM value
     Serial.print(" | Dir=");
-      if      (dirState>0)  Serial.print("FWD");
-      else if (dirState<0)  Serial.print("REV");
-      else                  Serial.print("STOP");
-    Serial.print(" | RPM=");    Serial.println(rpmSmoothed, 1);
-    lastPrint = millis();
+    if      (dirState > 0)  Serial.print("FWD");         // Print direction
+    else if (dirState < 0)  Serial.print("REV");
+    else                    Serial.print("STOP");
+    Serial.print(" | RPM=");    Serial.println(rpmSmoothed, 1); // Print RPM (1 decimal)
+    lastPrint = millis();           // Update last print time
   }
 }
 
-// —— ISR: Edge Timing for Instant RPM ——
+// ===========================
+//      Encoder Interrupt
+// ===========================
+// Called on any edge (rising/falling) of encoder signals A or B
 void onEncoder() {
-  unsigned long now = micros();
-  unsigned long dt = now - lastEdgeTime;
+  unsigned long now = micros();           // Current microsecond timestamp
+  unsigned long dt = now - lastEdgeTime;  // Time since last encoder edge
+
+  // Calculate RPM if time delta is positive (avoid div by zero)
   if (dt > 0) {
-    // pulses per second = 1e6 / dt
-    // RPM = (pulses/sec / steps_per_rev) * 60
-    rpmInstant = (1e6 / float(dt)) / STEPS_PER_REV * 60.0;
+    // pulses per second = 1e6 / dt (dt in microseconds)
+    // RPM = (pulses/sec / steps_per_rev) × 60
+    rpmInstant = (1e6f / float(dt)) / STEPS_PER_REV * 60.0f;
   }
-  lastEdgeTime = now;
+  lastEdgeTime = now;  // Update last edge time for next calculation
 }
